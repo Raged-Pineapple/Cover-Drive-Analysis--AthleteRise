@@ -1,0 +1,134 @@
+# Simplified thresholds configuration
+front_elbow_angle:
+  good: [120, 160]
+  warn: [100, 180]
+spine_lean_angle:
+  good: [0, 15]
+  warn: [0, 25]
+head_over_front_knee:
+  good: [0.00, 0.15]
+  warn: [0.00, 0.30]
+front_foot_direction:
+  good: [0, 20]
+  warn: [0, 35]
+shoulder_rotation:
+  good: [15, 45]
+  warn: [10, 60]
+knee_separation:
+  good: [0.3, 0.6]
+  warn: [0.2, 0.7]
+
+# Category scoring weights
+category_weights:
+  footwork:
+    front_foot_direction: 0.6
+    knee_separation: 0.4
+  
+  head_position:
+    head_over_front_knee: 0.8
+    spine_lean_angle: 0.2
+  
+  swing_control:
+    front_elbow_angle: 0.5
+    back_elbow_angle: 0.3
+    front_elbow_velocity: 0.2
+  
+  balance:
+    spine_lean_angle: 0.6
+    spine_lean_velocity: 0.4
+  
+  follow_through:
+    front_elbow_angle: 0.4
+    shoulder_rotation: 0.3
+    hip_rotation: 0.3
+
+# Pose estimation parameters
+pose_estimation:
+  model_complexity: 1  # 0=light, 1=full, 2=heavy
+  min_detection_confidence: 0.5
+  min_tracking_confidence: 0.5
+  enable_segmentation: false
+
+# Temporal smoothing parameters
+smoothing:
+  ema_alpha: 0.25
+  savgol_window: 7
+  savgol_polyorder: 2
+  kalman_process_noise: 0.01
+  kalman_measurement_noise: 0.1
+
+# Video processing parameters
+video_processing:
+  default_resize_long_side: 640
+  default_target_fps: 30
+  min_frames_for_analysis: 10
+  max_missing_keypoint_ratio: 0.4
+
+# Performance targets
+performance:
+  target_angle_mae: 6.0  # degrees
+  target_distance_mae: 0.03  # normalized
+  target_fps: 6.0  # frames per second
+  max_processing_time_per_frame: 0.167  # seconds (6 FPS)
+
+# Error handling
+error_handling:
+  insufficient_pose_detections_threshold: 0.6  # 60% of frames must have pose
+  max_consecutive_missing_frames: 10
+  min_confidence_for_keypoint: 0.3
+  min_visibility_for_keypoint: 0.3
+
+# Output configuration
+output:
+  video_codec: "mp4v"
+  video_quality: 95
+  json_indent: 2
+  save_debug_frames: false
+  debug_frame_interval: 30
+
+# Cricket-specific parameters
+cricket:
+  handedness_options: ["left", "right"]
+  default_handedness: "right"
+  cover_drive_phases: ["setup", "backswing", "downswing", "impact", "follow_through"]
+  
+  # Phase-specific thresholds
+  phases:
+    setup:
+      min_duration_frames: 5
+      max_spine_lean: 20
+    
+    backswing:
+      min_duration_frames: 8
+      max_elbow_angle: 180
+    
+    downswing:
+      min_duration_frames: 10
+      min_elbow_angle: 80
+    
+    impact:
+      min_duration_frames: 3
+      max_head_movement: 0.2
+    
+    follow_through:
+      min_duration_frames: 8
+      min_shoulder_rotation: 10
+
+front_elbow_angle:
+  good: [120, 160]
+  warn: [100, 180]
+spine_lean_angle:
+  good: [0, 15]
+  warn: [0, 25]
+head_over_front_knee:
+  good: [0.00, 0.15]
+  warn: [0.00, 0.30]
+front_foot_direction:
+  good: [0, 20]
+  warn: [0, 35]
+shoulder_rotation:
+  good: [15, 45]
+  warn: [10, 60]
+knee_separation:
+  good: [0.3, 0.6]
+  warn: [0.2, 0.7]

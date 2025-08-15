@@ -1,0 +1,7 @@
+# Simplified ideal values configuration
+front_elbow_angle: { target: 135, tol: 15, weight: 0.3 }
+spine_lean_angle:  { target: 10,  tol: 5,  weight: 0.2 }
+head_over_front_knee: { target: 0.12, tol: 0.05, weight: 0.2 }
+front_foot_direction: { target: 12, tol: 10, weight: 0.3 }
+shoulder_rotation: { target: 30, tol: 15, weight: 0.2 }
+knee_separation: { target: 0.45, tol: 0.15, weight: 0.1 }
