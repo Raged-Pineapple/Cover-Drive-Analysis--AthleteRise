@@ -72,7 +72,7 @@ class CoverDriveAnalyzer:
 
     def process_video(self, video_path: str, handedness: str, skill_level: str, 
                       enable_bat_tracking: bool, enable_phase_detection: bool, 
-                      progress_callback=None) -> Dict[str, Any]:
+                      progress_bar=None) -> Dict[str, Any]:
         """Process video, run analysis, and return results with annotated video path."""
         
         cap = cv2.VideoCapture(video_path)
@@ -126,9 +126,10 @@ class CoverDriveAnalyzer:
             
             out.write(annotated_frame)
             
-            if progress_callback:
+            if progress_bar:
                 progress = (frame_count + 1) / total_frames
-                progress_callback(progress)
+                progress_text = f"Processing frame {frame_count + 1} of {total_frames}... ({int(progress * 100)}%)"
+                progress_bar.progress(progress, text=progress_text)
             
             frame_count += 1
 
@@ -139,9 +140,14 @@ class CoverDriveAnalyzer:
             return {"error": "No pose detected, cannot perform analysis."}
 
         # Perform full analysis if metrics were collected
+        from utils.smoothing import Smoother
+
+        smoother = Smoother()
+        smoothness_score = smoother.compute_smoothness(metrics_history)
+
         if metrics_history:
             category_scores = self._compute_category_scores(metrics_history, skill_level)
-            assessment = self.skill_grader.assess_skill_level(category_scores)
+            assessment = self.skill_grader.assess_skill_level(category_scores, {"smoothness": smoothness_score})
             evaluation = self.skill_grader.generate_skill_report(assessment)
             evaluation['global'] = {'avg_fps': fps}
         else:
@@ -154,7 +160,10 @@ class CoverDriveAnalyzer:
             }
         
         report_path_html = output_dir / "report.html"
-        self.report_generator.generate_html_report(evaluation, str(report_path_html))
+        self.report_generator.generate_html_report(
+            {"evaluation": evaluation},  # ✅ wrap it
+            str(report_path_html)
+        )
 
         return {
             "annotated_video_path": str(output_video_path),
@@ -162,6 +171,7 @@ class CoverDriveAnalyzer:
             "report_paths": {"html": str(report_path_html)},
             "landmarks_data": landmarks_history
         }
+
 
 # --- END INLINED ANALYSIS CLASS ---
 
@@ -221,16 +231,17 @@ def main():
                 st.error("Download failed. Please check the URL and try again.")
 
     if video_source and st.button("Start Analysis", type="primary", use_container_width=True):
-        with st.spinner("Processing video..."):
-            results = run_analysis(
-                video_source, handedness, resize_long_side, target_fps,
-                skill_level, enable_bat_tracking, enable_phase_detection
-            )
-            if results:
-                st.session_state['analysis_results'] = results
-                st.success("✅ Analysis complete!")
-            else:
-                st.error("❌ Analysis failed.")
+        progress_bar = st.progress(0, text="Analysis starting...")
+        results = run_analysis(
+            video_source, handedness, resize_long_side, target_fps,
+            skill_level, enable_bat_tracking, enable_phase_detection,
+            progress_bar
+        )
+        if results:
+            st.session_state['analysis_results'] = results
+            st.success("✅ Analysis complete!")
+        else:
+            st.error("❌ Analysis failed.")
 
     if 'analysis_results' in st.session_state:
             display_results(st.session_state['analysis_results'], gemini_analyzer)
@@ -238,7 +249,7 @@ def main():
 
 # ---------------- RUN ANALYSIS ---------------- #
 
-def run_analysis(video_source, handedness, resize_long_side, target_fps, skill_level, enable_bat_tracking, enable_phase_detection):
+def run_analysis(video_source, handedness, resize_long_side, target_fps, skill_level, enable_bat_tracking, enable_phase_detection, progress_bar):
     try:
         analyzer = CoverDriveAnalyzer(
             handedness=handedness,
@@ -253,7 +264,7 @@ def run_analysis(video_source, handedness, resize_long_side, target_fps, skill_l
             skill_level=skill_level,
             enable_bat_tracking=enable_bat_tracking,
             enable_phase_detection=enable_phase_detection,
-            progress_callback=st.progress
+            progress_bar=progress_bar
         )
 
         # Ensure annotated video path is present (fallback if analyzer didn't attach it)
@@ -272,8 +283,6 @@ def run_analysis(video_source, handedness, resize_long_side, target_fps, skill_l
             except Exception as e:
                 st.warning(f"Report generation failed: {e}")
 
-        st.write("--- DEBUG: Analysis results from backend ---")
-        st.json(results)
         return results
 
     except Exception as e:
@@ -285,6 +294,18 @@ def run_analysis(video_source, handedness, resize_long_side, target_fps, skill_l
 
 def display_results(results, gemini_analyzer):
     st.header("Analysis Results")
+
+    # Download button for the report
+    report_path = results.get("report_paths", {}).get("html")
+    if report_path and Path(report_path).exists():
+        with open(report_path, "rb") as f:
+            st.download_button(
+                label="📄 Download Full Report",
+                data=f,
+                file_name="cover_drive_analysis_report.html",
+                mime="text/html",
+                use_container_width=True
+            )
 
     col1, col2 = st.columns([1, 1])
 

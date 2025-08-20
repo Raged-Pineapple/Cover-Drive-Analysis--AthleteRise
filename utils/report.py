@@ -478,24 +478,22 @@ class ReportGenerator:
     
     def _create_technique_analysis(self, summary: Dict[str, Any]) -> str:
         """Create technique analysis section."""
-        
         if not summary:
-            return """
-            <div class="section">
-                <h2>🎯 Technique Analysis</h2>
-                <p>No technique analysis data available.</p>
-            </div>
-            """
-        
-        # Create category analysis
+            # If no summary provided, hide section entirely (instead of forcing "No data")
+            return ""
+
         category_html = []
         for category, data in summary.items():
             if isinstance(data, dict) and 'score' in data:
                 score = data['score']
                 feedback = data.get('feedback', 'No feedback available')
-                
-                score_class = "score-high" if score >= 7 else "score-medium" if score >= 5 else "score-low"
-                
+
+                score_class = (
+                    "score-high" if score >= 7
+                    else "score-medium" if score >= 5
+                    else "score-low"
+                )
+
                 category_html.append(f"""
                 <tr>
                     <td><strong>{category}</strong></td>
@@ -503,11 +501,15 @@ class ReportGenerator:
                     <td>{feedback}</td>
                 </tr>
                 """)
-        
+
+        if not category_html:
+            # If summary exists but no valid rows, return nothing
+            return ""
+
         return f"""
         <div class="section">
             <h2>🎯 Technique Analysis</h2>
-            <p>Detailed breakdown of technique across five key categories:</p>
+            <p>Detailed breakdown of technique across key categories:</p>
             
             <table>
                 <thead>
@@ -523,43 +525,44 @@ class ReportGenerator:
             </table>
         </div>
         """
+
     
     def _create_detailed_metrics(self, results: Dict[str, Any]) -> str:
-        """Create detailed metrics section."""
-        
+        """Create detailed metrics section (only if data is available)."""
+
         sections = []
-        
+
         # Add smoothness chart if available
-        if 'smoothness_chart' in results and os.path.exists(results['smoothness_chart']):
+        if results.get('smoothness_chart') and os.path.exists(results['smoothness_chart']):
             sections.append(f"""
             <div class="chart-container">
                 <h3>📊 Temporal Smoothness Analysis</h3>
                 <img src="data:image/png;base64,{self._image_to_base64(results['smoothness_chart'])}" 
-                     alt="Smoothness Analysis Chart">
+                    alt="Smoothness Analysis Chart">
             </div>
             """)
-        
+
         # Add phase analysis if available
-        if 'evaluation' in results and 'phase_analysis' in results['evaluation']:
-            phase_data = results['evaluation']['phase_analysis']
-            if phase_data.get('available', False):
-                sections.append(self._create_phase_analysis_html(phase_data))
-        
+        phase_data = results.get('evaluation', {}).get('phase_analysis')
+        if phase_data and phase_data.get('available'):
+            sections.append(self._create_phase_analysis_html(phase_data))
+
         # Add contact analysis if available
-        if 'evaluation' in results and 'contact_analysis' in results['evaluation']:
-            contact_data = results['evaluation']['contact_analysis']
-            if contact_data.get('available', False):
-                sections.append(self._create_contact_analysis_html(contact_data))
-        
+        contact_data = results.get('evaluation', {}).get('contact_analysis')
+        if contact_data and contact_data.get('available'):
+            sections.append(self._create_contact_analysis_html(contact_data))
+
+        # If no subsections, return nothing (hide section)
         if not sections:
-            sections.append("<p>No detailed metrics available.</p>")
-        
+            return ""
+
         return f"""
         <div class="section">
             <h2>📊 Detailed Metrics</h2>
             {''.join(sections)}
         </div>
         """
+
     
     def _create_phase_analysis_html(self, phase_data: Dict[str, Any]) -> str:
         """Create phase analysis HTML."""
