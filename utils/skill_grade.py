@@ -383,3 +383,11 @@ class SkillGrader:
         except Exception as e:
             print(f"Error writing skill assessment: {e}")
             return ""
+    def grade_player(category_scores: Dict[str, float], smoothness_analysis: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Wrapper for backward compatibility.
+        Returns a skill report dict like before.
+        """
+        grader = SkillGrader()
+        assessment = grader.assess_skill_level(category_scores, smoothness_analysis)
+        return grader.generate_skill_report(assessment)

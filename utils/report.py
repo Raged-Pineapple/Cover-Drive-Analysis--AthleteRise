@@ -23,7 +23,7 @@ except ImportError:
 
 try:
     from reportlab.lib.pagesizes import letter, A4
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import inch
     from reportlab.lib import colors
@@ -385,12 +385,25 @@ class ReportGenerator:
                           output_path: str = "output/report.pdf") -> str:
         """Generate PDF report using available PDF libraries."""
         
-        if PDFKIT_AVAILABLE:
-            return self._generate_pdfkit_report(analysis_results, output_path)
-        elif REPORTLAB_AVAILABLE:
+        # Prefer ReportLab (pure Python; no system binary needed)
+        if REPORTLAB_AVAILABLE:
             return self._generate_reportlab_report(analysis_results, output_path)
-        else:
-            raise ImportError("No PDF generation library available. Install pdfkit or reportlab.")
+
+        # Fallback to pdfkit only if wkhtmltopdf executable is present
+        if PDFKIT_AVAILABLE:
+            try:
+                import shutil
+                # Try to locate wkhtmltopdf in PATH
+                if shutil.which('wkhtmltopdf') is None:
+                    # Also respect a common env var if user sets it
+                    wk_path = os.getenv('WKHTMLTOPDF_CMD')
+                    if not wk_path or not os.path.exists(wk_path):
+                        raise RuntimeError("wkhtmltopdf executable not found in PATH. Set WKHTMLTOPDF_CMD env or install system binary.")
+                return self._generate_pdfkit_report(analysis_results, output_path)
+            except Exception as e:
+                raise Exception(f"PDF generation failed: {e}")
+
+        raise ImportError("No PDF generation library available. Install reportlab or pdfkit + wkhtmltopdf.")
     
     def _create_html_content(self, results: Dict[str, Any]) -> str:
         """Create the complete HTML content for the report."""
@@ -643,10 +656,6 @@ class ReportGenerator:
                     <p style="font-size: 1.5em; font-weight: bold; color: #1f77b4;">{avg_fps:.1f} FPS</p>
                 </div>
                 <div class="metric-card">
-                    <h3>Frames Analyzed</h3>
-                    <p style="font-size: 1.5em; font-weight: bold; color: #1f77b4;">{frames_analyzed}</p>
-                </div>
-                <div class="metric-card">
                     <h3>Detection Rate</h3>
                     <p style="font-size: 1.5em; font-weight: bold; color: #1f77b4;">{detection_rate:.1f}%</p>
                 </div>
@@ -659,12 +668,13 @@ class ReportGenerator:
         """
     
     def _create_recommendations(self, evaluation: Dict[str, Any]) -> str:
-        """Create recommendations section."""
+        """Create recommendations section (only if provided)."""
         
         recommendations = evaluation.get('recommendations', [])
         
         if not recommendations:
-            recommendations = ["No specific recommendations available."]
+            # hide section entirely if no recommendations
+            return ""
         
         if isinstance(recommendations, str):
             recommendations = [recommendations]
@@ -682,6 +692,7 @@ class ReportGenerator:
             </div>
         </div>
         """
+
     
     def _create_footer(self) -> str:
         """Create report footer."""
@@ -758,21 +769,110 @@ class ReportGenerator:
         """Create content for reportlab PDF."""
         
         content = []
-        
+        evaluation = results.get('evaluation', {})
+        summary = evaluation.get('summary', {})
+        global_stats = evaluation.get('global', {})
+
         # Title
         title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontSize=24,
-            spaceAfter=30,
-            alignment=1  # Center
+            'CustomTitle', parent=styles['Heading1'], fontSize=22, spaceAfter=18, alignment=1
         )
         content.append(Paragraph("Cricket Cover Drive Analysis Report", title_style))
-        content.append(Spacer(1, 20))
-        
-        # Add more content based on results...
-        # This is a simplified version - you can expand this based on your needs
-        
+        content.append(Spacer(1, 10))
+
+        # Executive Summary
+        skill_level = evaluation.get('skill_level', 'Unknown')
+        overall_score = evaluation.get('overall_score', 0.0)
+        summary_text = self._get_skill_level_summary(skill_level, overall_score)
+        content.append(Paragraph("Executive Summary", styles['Heading2']))
+        content.append(Paragraph(summary_text, styles['BodyText']))
+        content.append(Spacer(1, 10))
+
+        # Top metrics table
+        metrics_data = [
+            ["Skill Level", str(skill_level)],
+            ["Overall Score", f"{overall_score:.1f}/10"],
+            ["Analysis Date", datetime.now().strftime('%B %d, %Y')]
+        ]
+        t = Table(metrics_data, hAlign='LEFT', colWidths=[2.5*inch, 3.5*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.white),
+            ('TEXTCOLOR', (0,0), (-1,-1), colors.black),
+            ('FONTNAME', (0,0), (-1,-1), 'Helvetica'),
+            ('FONTSIZE', (0,0), (-1,-1), 10),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+            ('GRID', (0,0), (-1,-1), 0.25, colors.grey)
+        ]))
+        content.append(t)
+        content.append(Spacer(1, 12))
+
+        # Technique Analysis table (if available)
+        if isinstance(summary, dict) and summary:
+            content.append(Paragraph("Technique Analysis", styles['Heading2']))
+            table_rows = [["Category", "Score", "Feedback"]]
+            for category, data in summary.items():
+                if isinstance(data, dict) and 'score' in data:
+                    score = data.get('score', 0.0)
+                    feedback = data.get('feedback', '')
+                    table_rows.append([category, f"{score:.1f}/10", feedback])
+            tech_table = Table(table_rows, hAlign='LEFT', colWidths=[2.2*inch, 1.0*inch, 3.8*inch])
+            tech_table.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1f77b4')),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                ('ALIGN', (1,1), (1,-1), 'CENTER'),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('FONTNAME', (0,1), (-1,-1), 'Helvetica'),
+                ('FONTSIZE', (0,0), (-1,-1), 9),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.whitesmoke, colors.lightgrey]),
+                ('GRID', (0,0), (-1,-1), 0.25, colors.grey)
+            ]))
+            content.append(tech_table)
+            content.append(Spacer(1, 12))
+
+        # Performance Analysis (if available)
+        if isinstance(global_stats, dict) and global_stats:
+            content.append(Paragraph("Performance Analysis", styles['Heading2']))
+            avg_fps = global_stats.get('avg_fps', 0)
+            frames_analyzed = global_stats.get('frames_analyzed', 0)
+            missing_keypoints = global_stats.get('frames_with_missing_keypoints', 0)
+            detection_rate = (1 - missing_keypoints / max(frames_analyzed or 1, 1)) * 100
+            perf_rows = [
+                ["Processing Speed (FPS)", f"{avg_fps:.1f}"],
+                ["Detection Rate", f"{detection_rate:.1f}%"],
+                ["Missing Keypoints", str(missing_keypoints)]
+            ]
+            perf_table = Table(perf_rows, hAlign='LEFT', colWidths=[3.0*inch, 2.0*inch])
+            perf_table.setStyle(TableStyle([
+                ('GRID', (0,0), (-1,-1), 0.25, colors.grey),
+                ('FONTSIZE', (0,0), (-1,-1), 10)
+            ]))
+            content.append(perf_table)
+            content.append(Spacer(1, 12))
+
+        # Smoothness chart image (if available)
+        chart_path = results.get('smoothness_chart')
+        if chart_path and os.path.exists(chart_path):
+            try:
+                content.append(Paragraph("Temporal Smoothness Analysis", styles['Heading2']))
+                content.append(Image(chart_path, width=6.0*inch, height=3.0*inch))
+                content.append(Spacer(1, 12))
+            except Exception:
+                pass
+
+        # Recommendations
+        recs = evaluation.get('recommendations', [])
+        if isinstance(recs, str):
+            recs = [recs]
+        if recs:
+            content.append(Paragraph("Recommendations", styles['Heading2']))
+            for rec in recs:
+                content.append(Paragraph(f"• {rec}", styles['BodyText']))
+            content.append(Spacer(1, 12))
+
+        # Footer note
+        content.append(PageBreak())
+        content.append(Paragraph("Generated by AthleteRise Biomechanical Analysis System", styles['Italic']))
+
         return content
 
 

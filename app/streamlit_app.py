@@ -2,6 +2,14 @@
 Streamlit web application for Cricket Cover Drive Analysis.
 Provides interactive interface for video upload, processing, and results display.
 """
+import warnings
+# Suppress noisy protobuf deprecation warning from dependencies
+warnings.filterwarnings(
+    "ignore",
+    message="SymbolDatabase.GetPrototype() is deprecated",
+    category=UserWarning,
+    module="google.protobuf.symbol_database"
+)
 
 import streamlit as st
 import sys
@@ -13,13 +21,15 @@ import yt_dlp
 import cv2
 from dotenv import load_dotenv
 from os import getenv
-
+import subprocess
+load_dotenv()
 # Add parent directory to path for imports
 parent_dir = str(Path(__file__).parent.parent.resolve())
 sys.path.insert(0, parent_dir)
 
 # Import from utils
 from utils.gemini_analysis import GeminiAnalyzer
+# from utils.ai_helper import extract_text
 from utils.plotting import ChartGenerator
 from utils.skill_grade import SkillGrader
 from utils.report import ReportGenerator
@@ -31,7 +41,6 @@ import importlib.util
 
 # --- BEGIN INLINED ANALYSIS CLASS ---
 # This class is inlined to prevent issues with cached Python modules.
-
 class CoverDriveAnalyzer:
     def _compute_category_scores(self, metrics_history: list, skill_level: str) -> dict:
         """Placeholder to compute category scores from metrics."""
@@ -86,10 +95,13 @@ class CoverDriveAnalyzer:
 
         output_dir = Path("output")
         output_dir.mkdir(exist_ok=True)
-        output_video_path = output_dir / f"annotated_{Path(video_path).name}"
-        
-        fourcc = cv2.VideoWriter_fourcc(*'avc1')
-        out = cv2.VideoWriter(str(output_video_path), fourcc, fps, (width, height))
+        # Write to a robust intermediate AVI (MJPG), then convert to H.264 MP4 for browsers
+        intermediate_path = output_dir / f"annotated_{Path(video_path).stem}.avi"
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+        out = cv2.VideoWriter(str(intermediate_path), fourcc, fps, (width, height))
+        if not out.isOpened():
+            cap.release()
+            return {"error": "Failed to open video writer. MJPG codec not available. Install opencv-contrib or fallback codecs."}
 
         landmarks_history = []
         metrics_history = []
@@ -135,11 +147,97 @@ class CoverDriveAnalyzer:
 
         cap.release()
         out.release()
+
+        # Quick sanity check: ensure file was written and non-empty
+        try:
+            if intermediate_path.exists() and intermediate_path.stat().st_size < 1024:
+                return {"error": "Annotated video file appears empty or too small. Encoding likely failed."}
+        except Exception:
+            pass
+        
+        # Optional: create a browser-friendly copy using H.264 if moviepy/ffmpeg is available
+        web_safe_path = None
+        encode_notes = []
+        try:
+            from moviepy.editor import VideoFileClip
+            web_safe_path = output_dir / f"annotated_{Path(video_path).stem}.mp4"
+            # Re-encode to H.264 for maximum browser compatibility
+            # Disable audio, set fps explicitly
+            clip = VideoFileClip(str(intermediate_path))
+            clip.write_videofile(
+                str(web_safe_path),
+                codec="libx264",
+                audio=False,
+                fps=fps,
+                preset="ultrafast",
+                ffmpeg_params=[
+                    "-movflags", "+faststart",
+                    "-pix_fmt", "yuv420p",
+                    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                    "-crf", "22",
+                ],
+                verbose=True,
+            )
+            clip.close()
+            # Validate MP4 has readable frames
+            try:
+                vcap = cv2.VideoCapture(str(web_safe_path))
+                test_ret, _ = vcap.read()
+                frames = int(vcap.get(cv2.CAP_PROP_FRAME_COUNT))
+                vcap.release()
+                if not test_ret or frames == 0:
+                    encode_notes.append("Validation failed: MP4 has no readable frames; falling back to AVI.")
+                    web_safe_path = None
+            except Exception as ve:
+                encode_notes.append(f"Validation error: {ve}")
+        except Exception as _e:
+            # Non-fatal; we will use the original annotated video instead
+            encode_notes.append(f"Conversion failed: {_e}")
+            web_safe_path = None
+
+        # Fallback: try direct ffmpeg CLI via imageio-ffmpeg, if MoviePy path failed
+        if web_safe_path is None:
+            try:
+                import imageio_ffmpeg
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                web_safe_path = output_dir / f"annotated_{Path(video_path).stem}.mp4"
+                cmd = [
+                    ffmpeg_exe,
+                    "-y",
+                    "-i", str(intermediate_path),
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                    "-crf", "22",
+                    "-r", str(fps if fps > 0 else 30),
+                    str(web_safe_path)
+                ]
+                completed = subprocess.run(cmd, capture_output=True, text=True)
+                if completed.returncode != 0:
+                    encode_notes.append(f"ffmpeg fallback failed: {completed.stderr[:300]}")
+                    web_safe_path = None
+                else:
+                    # Validate produced MP4
+                    vcap = cv2.VideoCapture(str(web_safe_path))
+                    ok, _ = vcap.read()
+                    frames = int(vcap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    vcap.release()
+                    if not ok or frames == 0:
+                        encode_notes.append("ffmpeg output not readable; falling back to AVI.")
+                        web_safe_path = None
+                    else:
+                        encode_notes.append("ffmpeg fallback succeeded.")
+            except Exception as fe:
+                encode_notes.append(f"ffmpeg fallback error: {fe}")
+        
+        # Prefer the web-safe mp4; if unavailable, fall back to the intermediate AVI
+        output_video_path = web_safe_path if web_safe_path else intermediate_path
         
         if not landmarks_history:
             return {"error": "No pose detected, cannot perform analysis."}
 
-        # Perform full analysis if metrics were collected
+       # Perform full analysis if metrics were collected
         from utils.smoothing import Smoother
 
         smoother = Smoother()
@@ -158,19 +256,42 @@ class CoverDriveAnalyzer:
                 'feedback': {'error': 'Could not compute metrics for evaluation.'},
                 'global': {'avg_fps': fps}
             }
-        
-        report_path_html = output_dir / "report.html"
-        self.report_generator.generate_html_report(
-            {"evaluation": evaluation},  # ✅ wrap it
-            str(report_path_html)
-        )
 
-        return {
+        # ✅ NEW: AI Recommendations via Gemini
+        try:
+            from utils.ai_helper import generate_ai_recommendations  # create this helper
+
+            evaluation['recommendations'] = generate_ai_recommendations(evaluation)
+        except Exception as e:
+            print(f"[AI Recommendations] Failed: {e}")
+            evaluation['recommendations'] = ["No AI recommendations available."]
+
+        results = {
             "annotated_video_path": str(output_video_path),
+            "web_annotated_video_path": str(web_safe_path) if web_safe_path else None,
+            "intermediate_video_path": str(intermediate_path),
+            "encode_notes": encode_notes,
             "evaluation": evaluation,
-            "report_paths": {"html": str(report_path_html)},
-            "landmarks_data": landmarks_history
+            "metrics_history": metrics_history,
+            "frames_analyzed": len(metrics_history),
+            "smoothness_score": smoothness_score,
+            "landmarks_data": landmarks_history,
         }
+
+        report_path_html = output_dir / "report.html"
+        self.report_generator.generate_html_report(results, str(report_path_html))
+        results["report_paths"] = {"html": str(report_path_html)}
+        # Try creating a PDF as well (if dependencies available)
+        try:
+            report_path_pdf = output_dir / "report.pdf"
+            self.report_generator.generate_pdf_report(results, str(report_path_pdf))
+            results["report_paths"]["pdf"] = str(report_path_pdf)
+        except Exception as e:
+            # Non-fatal: PDF backend not available
+            print(f"[ReportGen] PDF not generated: {e}")
+
+        return results
+
 
 
 # --- END INLINED ANALYSIS CLASS ---
@@ -179,21 +300,26 @@ class CoverDriveAnalyzer:
 # ---------------- MAIN APP ---------------- #
 
 def main():
-    load_dotenv()
+    
 
     st.set_page_config(
         page_title="Cricket Cover Drive Analysis",
         layout="wide",
         initial_sidebar_state="expanded"
     )
-    st.title("🏏 Cricket Cover Drive Analysis")
+    st.title("Cricket Cover Drive Analysis")
 
-    # Initialize Gemini Analyzer (optional)
-    try:
-        gemini_analyzer = GeminiAnalyzer(api_key=getenv("GEMINI_API_KEY", ""))
-    except Exception as e:
-        st.warning(f"Gemini analyzer not available: {e}")
-        gemini_analyzer = None
+    # Initialize session state for persistence across reruns
+    st.session_state.setdefault('analysis_results', None)
+    st.session_state.setdefault('last_video_source', None)
+    st.session_state.setdefault('debug_mode', False)
+
+    # # Initialize Gemini Analyzer (optional)
+    # try:
+    #     gemini_analyzer = GeminiAnalyzer(api_key=getenv("GEMINI_API_KEY", ""))
+    # except Exception as e:
+    #     st.warning(f"Gemini analyzer not available: {e}")
+    #     gemini_analyzer = None
 
     # Sidebar UI
     with st.sidebar:
@@ -205,6 +331,9 @@ def main():
         skill_level = st.selectbox("Reference Skill Level", ["beginner", "intermediate", "advanced", "professional"], index=1)
         enable_bat_tracking = st.checkbox("Enable Bat Tracking", value=True)
         enable_phase_detection = st.checkbox("Enable Phase Detection", value=True)
+        debug_mode = st.checkbox("Debug mode", value=bool(st.session_state.get('debug_mode', False)))
+        # Persist debug mode across reruns
+        st.session_state['debug_mode'] = bool(debug_mode)
 
     # Main UI
     video_source = None
@@ -216,7 +345,11 @@ def main():
             with open(video_path, "wb") as f:
                 f.write(uploaded_file.getvalue())
             video_source = str(video_path)
-            st.success(f"✅ Video uploaded: {uploaded_file.name}")
+            # Reset results if video changes
+            if st.session_state.get('last_video_source') != video_source:
+                st.session_state['analysis_results'] = None
+                st.session_state['last_video_source'] = video_source
+            st.success(f"Video uploaded: {uploaded_file.name}")
             st.video(video_source)
     else:  # YouTube URL
         youtube_url = st.text_input("YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
@@ -225,10 +358,18 @@ def main():
                 video_source = download_youtube_video(youtube_url, Path("output"))
             
             if video_source:
-                st.success(f"✅ YouTube video downloaded: {Path(video_source).name}")
+                # Reset results if video changes
+                if st.session_state.get('last_video_source') != video_source:
+                    st.session_state['analysis_results'] = None
+                    st.session_state['last_video_source'] = video_source
+                st.success(f"YouTube video downloaded: {Path(video_source).name}")
                 st.video(video_source)
             else:
                 st.error("Download failed. Please check the URL and try again.")
+
+    # If we have previous results, show them automatically (so toggles/downloads don't lose state)
+    if st.session_state.get('analysis_results') and not st.session_state.get('just_ran'):
+        display_results(st.session_state['analysis_results'])
 
     if video_source and st.button("Start Analysis", type="primary", use_container_width=True):
         progress_bar = st.progress(0, text="Analysis starting...")
@@ -237,14 +378,19 @@ def main():
             skill_level, enable_bat_tracking, enable_phase_detection,
             progress_bar
         )
-        if results:
+        if results and not results.get("error"):
             st.session_state['analysis_results'] = results
-            st.success("✅ Analysis complete!")
+            st.session_state['just_ran'] = True
+            st.success("Analysis complete!")
+            # Immediately render results
+            display_results(results)
+            # Clear the just_ran flag after showing once
+            st.session_state['just_ran'] = False
         else:
-            st.error("❌ Analysis failed.")
+            err = results.get("error") if isinstance(results, dict) else None
+            st.error(f"Analysis failed. {err or ''}")
 
-    if 'analysis_results' in st.session_state:
-            display_results(st.session_state['analysis_results'], gemini_analyzer)
+    
 
 
 # ---------------- RUN ANALYSIS ---------------- #
@@ -292,32 +438,45 @@ def run_analysis(video_source, handedness, resize_long_side, target_fps, skill_l
 
 # ---------------- DISPLAY RESULTS ---------------- #
 
-def display_results(results, gemini_analyzer):
+def display_results(results):
     st.header("Analysis Results")
 
-    # Download button for the report
-    report_path = results.get("report_paths", {}).get("html")
-    if report_path and Path(report_path).exists():
-        with open(report_path, "rb") as f:
+    # Download buttons for reports
+    report_paths = results.get("report_paths", {})
+    report_html = report_paths.get("html")
+    report_pdf = report_paths.get("pdf")
+    if report_html and Path(report_html).exists():
+        with open(report_html, "rb") as f:
             st.download_button(
-                label="📄 Download Full Report",
+                label="Download Full Report (HTML)",
                 data=f,
                 file_name="cover_drive_analysis_report.html",
                 mime="text/html",
                 use_container_width=True
             )
+    if report_pdf and Path(report_pdf).exists():
+        with open(report_pdf, "rb") as fpdf:
+            st.download_button(
+                label="Download as PDF",
+                data=fpdf,
+                file_name="cover_drive_analysis_report.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+    elif report_html and Path(report_html).exists() and not report_pdf:
+        st.caption("PDF generation not available (install pdfkit with wkhtmltopdf or reportlab).")
 
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        st.subheader("📹 Annotated Video")
+        st.subheader("Annotated Video")
         display_video_results(results)
 
     with col2:
-        st.subheader("📊 Performance Overview")
+        st.subheader("Performance Overview")
         display_overview(results)
         
-        st.subheader("📈 Category Breakdown")
+        st.subheader("Category Breakdown")
         display_category_scores(results)
 
 
@@ -343,7 +502,8 @@ def display_category_scores(results: Dict[str, Any]):
         return
 
     for category, score in category_scores.items():
-        st.slider(category, 0.0, 10.0, float(score), disabled=True)
+        # Use a small float step to avoid min/max/step conflicts with float defaults
+        st.slider(category, 0.0, 10.0, float(score), step=0.01, disabled=True)
 
 
 
@@ -362,24 +522,109 @@ def display_reports(results: Dict[str, Any]):
 
 
 def display_video_results(results: Dict[str, Any]):
-    st.subheader("📹 Videos")
-    annotated_video_path = results.get("annotated_video_path")
+    st.subheader("Videos")
+    web_safe = results.get("web_annotated_video_path")
+    annotated_video_path = web_safe or results.get("annotated_video_path")
 
     if annotated_video_path and Path(annotated_video_path).exists():
         try:
-            with open(annotated_video_path, "rb") as f:
-                video_bytes = f.read()
-            st.video(video_bytes, format="video/mp4")
+            # If we only have an AVI fallback, browsers will not play it inline
+            if Path(annotated_video_path).suffix.lower() == ".avi":
+                st.info("Embedded playback not supported for AVI. Please download and play locally.")
+                with open(annotated_video_path, "rb") as f:
+                    st.download_button("Download annotated video (AVI)", f, file_name=Path(annotated_video_path).name, mime="video/avi")
+                # Offer one-click conversion to MP4 without re-running analysis
+                fps_hint = results.get("evaluation", {}).get("global", {}).get("avg_fps", 30)
+                if st.button("Convert to MP4 (H.264)", use_container_width=True):
+                    try:
+                        import imageio_ffmpeg, subprocess
+                        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                        src = Path(results.get("intermediate_video_path") or annotated_video_path)
+                        dst = Path(src).with_suffix('.mp4')
+                        cmd = [
+                            ffmpeg_exe,
+                            "-y",
+                            "-i", str(src),
+                            "-c:v", "libx264",
+                            "-pix_fmt", "yuv420p",
+                            "-movflags", "+faststart",
+                            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                            "-crf", "22",
+                            "-r", str(int(fps_hint) if fps_hint else 30),
+                            str(dst)
+                        ]
+                        completed = subprocess.run(cmd, capture_output=True, text=True)
+                        if completed.returncode == 0 and dst.exists():
+                            st.session_state['analysis_results']['web_annotated_video_path'] = str(dst)
+                            st.success("MP4 created. Reloading...")
+                            st.experimental_rerun()
+                        else:
+                            st.error("MP4 conversion failed. See debug notes.")
+                    except Exception as ce:
+                        st.error(f"Conversion error: {ce}")
+            else:
+                # Use file path for Streamlit to infer and serve correctly
+                st.video(str(annotated_video_path))
+                if web_safe:
+                    st.caption("Playing web-optimized H.264 copy for maximum compatibility.")
         except Exception as e:
             st.error(f"Error displaying annotated video: {e}")
+            st.info("You can still download and play the file locally:")
+            with open(annotated_video_path, "rb") as f:
+                st.download_button("Download annotated video", f, file_name=Path(annotated_video_path).name, mime="video/mp4")
     else:
         st.warning("Annotated video not available.")
 
+    # Always show diagnostics in debug mode
+    if st.session_state.get('debug_mode'):
+        p = Path(web_safe or results.get("annotated_video_path") or "")
+        st.markdown("**Debug: Video diagnostics**")
+        st.write({
+            "web_annotated_video_path": web_safe,
+            "annotated_video_path": results.get("annotated_video_path"),
+            "intermediate_video_path": results.get("intermediate_video_path"),
+            "encode_notes": results.get("encode_notes"),
+            "exists": p.exists() if p else False,
+            "suffix": p.suffix if p else None,
+            "size_bytes": (p.stat().st_size if p.exists() else None) if p else None,
+        })
+        if p and p.exists():
+            try:
+                cap = cv2.VideoCapture(str(p))
+                fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+                codec = ''.join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)])
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                ret, frame = cap.read()
+                cap.release()
+                st.write({
+                    "cv2_codec": codec,
+                    "fps": fps,
+                    "frames": frame_count,
+                    "width": width,
+                    "height": height,
+                    "first_frame_readable": bool(ret),
+                })
+            except Exception as e:
+                st.warning(f"Debug: could not probe video with OpenCV: {e}")
+        if p and p.exists():
+            try:
+                with open(p, "rb") as f:
+                    head = f.read(12)
+                st.write({"file_header_hex": head.hex()})
+            except Exception:
+                pass
 
+        # Always provide a download for manual check
+        if p and p.exists():
+            with open(p, "rb") as f:
+                st.download_button("Download (debug)", f, file_name=p.name, mime="video/mp4")
 
 
 def download_youtube_video(url: str, output_dir: Path) -> Optional[str]:
-    """Downloads a video from YouTube and returns the local file path."""
+    """Downloads a video from YouTube and returns the local file path (.mp4)."""
     try:
         output_dir.mkdir(exist_ok=True)
         ydl_opts = {
@@ -390,7 +635,14 @@ def download_youtube_video(url: str, output_dir: Path) -> Optional[str]:
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            return ydl.prepare_filename(info)
+            filename = ydl.prepare_filename(info)
+
+        # If the merger produced an mp4 with different suffix handling, prefer that
+        p = Path(filename)
+        mp4_candidate = output_dir / f"{p.stem}.mp4"
+        if p.suffix.lower() != '.mp4' and mp4_candidate.exists():
+            return str(mp4_candidate)
+        return str(p)
     except Exception as e:
         st.error(f"Failed to download video: {e}")
         return None

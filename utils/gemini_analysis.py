@@ -43,9 +43,9 @@ class GeminiAnalyzer:
         {json.dumps(json_compatible_data, indent=2)}
         
         Generate:
-        - Phase Analysis (2–4 sentences)
-        - Contact Analysis (2–4 sentences)
-        - Movement Smoothness (2–4 sentences)
+        - Phase Analysis (2-4 sentences)
+        - Contact Analysis (2-4 sentences)
+        - Movement Smoothness (2-4 sentences)
         
         Return the results in valid JSON format with keys:
         phase_analysis, contact_analysis, movement_smoothness
@@ -85,9 +85,25 @@ class GeminiAnalyzer:
                 'contact_analysis': f"Error: {str(e)}",
                 'movement_smoothness': f"Error: {str(e)}"
             }
+    def extract_text(response):
+        """Safely extract text from a Gemini response."""
+        texts = []
+        if response.candidates:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, "text") and part.text:
+                    texts.append(part.text)
+        return "\n".join(texts) if texts else "⚠️ Gemini returned no usable text."
+
 
 
 if __name__ == "__main__":
-    analyzer = GeminiAnalyzer(api_key="AIzaSyAZFJK3A6reFdmPRRc0zXDw71rJsQ5Kc5w")
-    analysis = analyzer.get_gemini_analysis("evaluation.json")
-    print(json.dumps(analysis, indent=2))
+    # Example usage: reads API key from environment for safety
+    api_key = os.getenv('GOOGLE_API_KEY')
+    if not api_key:
+        print("GOOGLE_API_KEY not set. Create a .env file and set GOOGLE_API_KEY=<your_key>.")
+    else:
+        analyzer = GeminiAnalyzer(api_key=api_key)
+        # Provide a valid path to an evaluation JSON file if you want to test locally
+        eval_path = os.getenv('EVALUATION_JSON', 'evaluation.json')
+        analysis = analyzer.get_gemini_analysis(eval_path)
+        print(json.dumps(analysis, indent=2))
